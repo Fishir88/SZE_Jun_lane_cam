@@ -85,14 +85,14 @@ class LaneDetector(Node):
         bottom_half = image[height//2:, :]
 
         gray = cv2.cvtColor(bottom_half, cv2.COLOR_BGR2GRAY)
-        gray = cv2.convertScaleAbs(gray, alpha=10, beta=70) 
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        gray = cv2.convertScaleAbs(gray, alpha=8, beta=70) 
+        gray = cv2.GaussianBlur(gray, (17, 13), 0)
         
         # Publish the image before Canny
         gray_ros_image = self.bridge.cv2_to_imgmsg(gray, 'mono8')
         self.brighttest_lane_img_pub.publish(gray_ros_image)
         
-        edges = cv2.Canny(gray, 50, 70)
+        edges = cv2.Canny(gray, 20, 50)
         
         # Publish the Canny edge-detected image
         edges_ros_image = self.bridge.cv2_to_imgmsg(edges, 'mono8')
@@ -101,28 +101,65 @@ class LaneDetector(Node):
         return edges
 
     def sliding_window(self, edges):
-        window_height = 15
-        num_windows = 10
+        window_height = 25
+        num_windows = 8
         margin = 200
-        minpix = 100
+        minpix = 150
 
         self.there_is_right_lane = False
         self.there_is_left_lane = False
 
         histogram = np.sum(edges, axis=0)
         
+        width = edges.shape[1]
+        left_side = edges[:, :width // 2]
+        histogram_l = np.sum(left_side, axis=1)
+        
+        right_side = edges[:, width // 2:]
+        histogram_r = np.sum(right_side, axis=1)
+        
+        nonzero_l = np.nonzero(histogram_l)[0]
+        first_nonzero_l = nonzero_l[0] if nonzero_l.size > 0 else None
+        
+        nonzero_r = np.nonzero(histogram_r)[0]
+        first_nonzero_r = nonzero_r[0] if nonzero_r.size > 0 else None
+        
+        nonzero_l = np.nonzero(histogram_l)[0]
+        last_nonzero_l = nonzero_l[-1] if nonzero_l.size > 0 else None
+        
+        nonzero_r = np.nonzero(histogram_r)[0]
+        last_nonzero_r = nonzero_r[-1] if nonzero_r.size > 0 else None
+        
+        trashold = 40
+        
+        if first_nonzero_l is None or (last_nonzero_r is not None and last_nonzero_r - first_nonzero_l < trashold):
+            self.there_is_right_lane = False
+        else:
+            self.there_is_right_lane = True
+            
+        if first_nonzero_r is None or (last_nonzero_l is not None and last_nonzero_l - first_nonzero_r < trashold):
+            self.there_is_left_lane = False
+        else:
+            self.there_is_left_lane = True
+        
+        print(f"Last non-zero l-coordinate: {first_nonzero_l}")
+        print(f"Last non-zero r-coordinate: {last_nonzero_r}")
+        
         midpoint = int(histogram.shape[0] // 2)
         leftx_base = np.argmax(histogram[:midpoint])
         rightx_base = np.argmax(histogram[midpoint:]) + midpoint
-
+        '''
         # Determine if only one lane is visible
         left_peak = np.max(histogram[:midpoint])
         right_peak = np.max(histogram[midpoint:])
-        visibility_threshold = 0.8 * np.max(histogram)
+        visibility_threshold = 0.7 * np.max(histogram)
 
         self.there_is_left_lane = left_peak > visibility_threshold
         self.there_is_right_lane = right_peak > visibility_threshold
-
+        
+        self.there_is_left_lane = first_nonzero_l is not None and last_nonzero_l is not None
+        self.there_is_right_lane = first_nonzero_r is not None and last_nonzero_r is not None
+        '''
         if not self.there_is_left_lane and not self.there_is_right_lane:
             self.get_logger().error("No lanes detected.")
             return None, None, None, None
