@@ -1,6 +1,5 @@
-import  cv2
+import cv2
 import numpy as np
-import warnings
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Image, CompressedImage
 from std_msgs.msg import Float32
@@ -9,16 +8,14 @@ from cv_bridge import CvBridge
 from rclpy.node import Node
 import rclpy
 
-class LaneDetector(Node):
+class LaneDetect(Node):
     def __init__(self):
         super().__init__('lane_detect')
         self.start()
         self.setup_subscribers_and_publishers()
         self.initialize_pid_parameters()
         self.bridge = CvBridge()
-        self.debug = False  # Set to True if yout want to enable debug mode
-        self.there_is_right_lane = False
-        self.there_is_left_lane = False
+        self.debug = False  # Set to True if you want to enable debug mode
 
     def start(self):
         self.declare_parameter('is_raw_image', True)
@@ -40,10 +37,10 @@ class LaneDetector(Node):
         self.drive_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.offset_pub = self.create_publisher(Float32, '/lane_center_offset', 10)
 
-    def initialize_pid_parameters(self): #  Sets up stuff for the actual driving part
-        self.p_gain = 0.01 # Proportional gain
-        self.i_gain = 0.001 # Integral gain
-        self.d_gain = 0.005 # Derivative gain
+    def initialize_pid_parameters(self): # Sets up stuff for the actual driving part
+        self.p_gain = 0.1 # Proportional gain
+        self.i_gain = 0.01 # Integral gain
+        self.d_gain = 0.05 # Derivative gain
         self.max_angle = 0.4  # Max steering angle in radians
         self.speed_mps = 0.5  # Speed in meters per second
         self.previous_t = self.get_clock().now() # Previous time
@@ -69,13 +66,13 @@ class LaneDetector(Node):
         edges = self.apply_edge_detection(image)
         left_fitx, right_fitx, ploty, midpoint = self.sliding_window(edges)
 
-        if not self.there_is_right_lane and not self.there_is_left_lane:
+        if left_fitx is None or right_fitx is None or ploty is None or midpoint is None:
             self.get_logger().error("Failed to detect lanes.")
             return image
 
         center_deviation = self.calculate_center_deviation(left_fitx, right_fitx, midpoint)
-        #self.publish_center_offset(center_deviation)
-        self.callback(center_deviation)
+        self.publish_center_offset(center_deviation)
+        self.publish_twist_message(center_deviation)
 
         return self.visualize_lanes(image, left_fitx, right_fitx, ploty, center_deviation)
 
@@ -85,14 +82,13 @@ class LaneDetector(Node):
         bottom_half = image[height//2:, :]
 
         gray = cv2.cvtColor(bottom_half, cv2.COLOR_BGR2GRAY)
-        gray = cv2.convertScaleAbs(gray, alpha=10, beta=10) 
-        gray = cv2.GaussianBlur(gray, (15, 19), 0)
+        gray = cv2.convertScaleAbs(gray, alpha=3, beta=-50) 
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Publish the image before Canny
         gray_ros_image = self.bridge.cv2_to_imgmsg(gray, 'mono8')
         self.brighttest_lane_img_pub.publish(gray_ros_image)
         
-        edges = cv2.Canny(gray, 0, 150)
+        edges = cv2.Canny(gray, 200, 220)
         
         # Publish the Canny edge-detected image
         edges_ros_image = self.bridge.cv2_to_imgmsg(edges, 'mono8')
@@ -101,75 +97,22 @@ class LaneDetector(Node):
         return edges
 
     def sliding_window(self, edges):
-        window_height = 30
-        num_windows = 8
-        margin = 100
-        minpix = 90
+        window_height = 40
+        num_windows = 10  # Increased number of windows
+        margin = 100  # Increased margin
+        minpix = 50  # Decreased minpix
 
-        self.there_is_right_lane = False
-        self.there_is_left_lane = False
-
-        histogram = np.sum(edges, axis=0)
-        
-        width = edges.shape[1]
-        left_side = edges[:, :width // 2]
-        histogram_l = np.sum(left_side, axis=1)
-        
-        right_side = edges[:, width // 2:]
-        histogram_r = np.sum(right_side, axis=1)
-        
-        nonzero_l = np.nonzero(histogram_l)[0]
-        first_nonzero_l = nonzero_l[0] if nonzero_l.size > 0 else None
-        
-        nonzero_r = np.nonzero(histogram_r)[0]
-        first_nonzero_r = nonzero_r[0] if nonzero_r.size > 0 else None
-        
-        nonzero_l = np.nonzero(histogram_l)[0]
-        last_nonzero_l = nonzero_l[-1] if nonzero_l.size > 0 else None
-        
-        nonzero_r = np.nonzero(histogram_r)[0]
-        last_nonzero_r = nonzero_r[-1] if nonzero_r.size > 0 else None
-        
-        treshold = 40
-        
-        if first_nonzero_l is None or (last_nonzero_r is not None and last_nonzero_r - first_nonzero_l < treshold):
-            self.there_is_right_lane = False
-        else:
-            self.there_is_right_lane = True
-            
-        if first_nonzero_r is None or (last_nonzero_l is not None and last_nonzero_l - first_nonzero_r < treshold):
-            self.there_is_left_lane = False
-        else:
-            self.there_is_left_lane = True
-        
-        print(f"Last non-zero l-coordinate: {first_nonzero_l}")
-        print(f"Last non-zero r-coordinate: {last_nonzero_r}")
-        
-        midpoint = int(histogram.shape[0] // 2)
+        histogram = np.sum(edges[edges.shape[0]//2:,:], axis=0)
+        midpoint = int(histogram.shape[0]//2)
         leftx_base = np.argmax(histogram[:midpoint])
         rightx_base = np.argmax(histogram[midpoint:]) + midpoint
-        '''
-        # Determine if only one lane is visible
-        left_peak = np.max(histogram[:midpoint])
-        right_peak = np.max(histogram[midpoint:])
-        visibility_threshold = 0.7 * np.max(histogram)
-
-        self.there_is_left_lane = left_peak > visibility_threshold
-        self.there_is_right_lane = right_peak > visibility_threshold
-        
-        self.there_is_left_lane = first_nonzero_l is not None and last_nonzero_l is not None
-        self.there_is_right_lane = first_nonzero_r is not None and last_nonzero_r is not None
-        '''
-        if not self.there_is_left_lane and not self.there_is_right_lane:
-            self.get_logger().error("No lanes detected.")
-            return None, None, None, None
 
         nonzero = edges.nonzero()
         nonzeroy = np.array(nonzero[0])
         nonzerox = np.array(nonzero[1])
 
-        leftx_current = leftx_base if self.there_is_left_lane else None
-        rightx_current = rightx_base if self.there_is_right_lane else None
+        leftx_current = leftx_base
+        rightx_current = rightx_base
 
         left_lane_inds = []
         right_lane_inds = []
@@ -177,73 +120,56 @@ class LaneDetector(Node):
         for window in range(num_windows):
             win_y_low = edges.shape[0] - (window + 1) * window_height
             win_y_high = edges.shape[0] - window * window_height
+            win_xleft_low = leftx_current - margin
+            win_xleft_high = leftx_current + margin
+            win_xright_low = rightx_current - margin
+            win_xright_high = rightx_current + margin
 
-            if self.there_is_left_lane:
-                win_xleft_low = leftx_current - margin
-                win_xleft_high = leftx_current + margin
-                good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
-                                  (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)).nonzero()[0]
-                left_lane_inds.append(good_left_inds)
-                if len(good_left_inds) > minpix:
-                    leftx_current = int(np.mean(nonzerox[good_left_inds]))
+            good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
+                              (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)).nonzero()[0]
+            good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
+                               (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)).nonzero()[0]
 
-            if self.there_is_right_lane:
-                win_xright_low = rightx_current - margin
-                win_xright_high = rightx_current + margin
-                good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
-                                   (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)).nonzero()[0]
-                right_lane_inds.append(good_right_inds)
-                if len(good_right_inds) > minpix:
-                    rightx_current = int(np.mean(nonzerox[good_right_inds]))
+            left_lane_inds.append(good_left_inds)
+            right_lane_inds.append(good_right_inds)
 
-        left_lane_inds = np.concatenate(left_lane_inds) if self.there_is_left_lane else np.array([])
-        right_lane_inds = np.concatenate(right_lane_inds) if self.there_is_right_lane else np.array([])
+            if len(good_left_inds) > minpix:
+                leftx_current = int(np.mean(nonzerox[good_left_inds]))
+            if len(good_right_inds) > minpix:
+                rightx_current = int(np.mean(nonzerox[good_right_inds]))
 
-        leftx = nonzerox[left_lane_inds] if self.there_is_left_lane else np.array([])
-        lefty = nonzeroy[left_lane_inds] if self.there_is_left_lane else np.array([])
-        rightx = nonzerox[right_lane_inds] if self.there_is_right_lane else np.array([])
-        righty = nonzeroy[right_lane_inds] if self.there_is_right_lane else np.array([])
+        left_lane_inds = np.concatenate(left_lane_inds)
+        right_lane_inds = np.concatenate(right_lane_inds)
+
+        leftx = nonzerox[left_lane_inds]
+        lefty = nonzeroy[left_lane_inds]
+        rightx = nonzerox[right_lane_inds]
+        righty = nonzeroy[right_lane_inds]
 
         # Debug statements
         if self.debug:
             print(f"Length of leftx: {len(leftx)}, Length of lefty: {len(lefty)}")
             print(f"Length of rightx: {len(rightx)}, Length of righty: {len(righty)}")
 
-        # Check if there are enough points to fit a polynomial
-        left_fit = None
-        right_fit = None
+        if len(leftx) == 0 or len(lefty) == 0 or len(rightx) == 0 or len(righty) == 0:
+            self.get_logger().error("One of the lane lines has no points detected.")
+            return None, None, None, None
 
-        if len(leftx) > 0 and len(lefty) > 0:
-            with warnings.catch_warnings():
-                warnings.simplefilter('error', np.RankWarning)
-                try:
-                    left_fit = np.polyfit(lefty, leftx, 2)
-                except np.RankWarning:
-                    self.get_logger().warning("Left lane polyfit may be poorly conditioned")
-
-        if len(rightx) > 0 and len(righty) > 0:
-            with warnings.catch_warnings():
-                warnings.simplefilter('error', np.RankWarning)
-                try:
-                    right_fit = np.polyfit(righty, rightx, 2)
-                except np.RankWarning:
-                    self.get_logger().warning("Right lane polyfit may be poorly conditioned")
+        left_fit = np.polyfit(lefty, leftx, 2)
+        right_fit = np.polyfit(righty, rightx, 2)
 
         ploty = np.linspace(0, edges.shape[0] - 1, edges.shape[0])
-        left_fitx = left_fit[0] * ploty**2 + left_fit[1] * ploty + left_fit[2] if left_fit is not None else None
-        right_fitx = right_fit[0] * ploty**2 + right_fit[1] * ploty + right_fit[2] if right_fit is not None else None
+        left_fitx = left_fit[0] * ploty**2 + left_fit[1] * ploty + left_fit[2]
+        right_fitx = right_fit[0] * ploty**2 + right_fit[1] * ploty + right_fit[2]
 
-        midpoint = edges.shape[1] // 2
+        midpoint = (left_fitx[-1] + right_fitx[-1]) / 2
 
         return left_fitx, right_fitx, ploty, midpoint
 
     def calculate_center_deviation(self, left_fitx, right_fitx, midpoint):
-        if left_fitx is not None and right_fitx is not None:
-            center_fitx_last = (left_fitx[-1] + right_fitx[-1]) / 2
-            return (center_fitx_last - midpoint) / 255
-        else:
-            return 0.0
-            
+        center_fitx = (left_fitx + right_fitx) / 2
+        return center_fitx[-1] - midpoint
+
     def publish_center_offset(self, center_deviation):
         self.offset_pub.publish(Float32(data=center_deviation))
 
@@ -256,12 +182,9 @@ class LaneDetector(Node):
     def visualize_lanes(self, image, left_fitx, right_fitx, ploty, center_deviation):
         line_image = np.zeros_like(image)
         for i in range(len(ploty)):
-            if self.there_is_left_lane and left_fitx is not None:
-                cv2.circle(line_image, (int(left_fitx[i]), int(ploty[i] + image.shape[0]//2)), 2, (255, 0, 0), -1)
-            if self.there_is_right_lane and right_fitx is not None:
-                cv2.circle(line_image, (int(right_fitx[i]), int(ploty[i] + image.shape[0]//2)), 2, (0, 255, 0), -1)
-            if self.there_is_left_lane and self.there_is_right_lane and left_fitx is not None and right_fitx is not None:
-                cv2.circle(line_image, (int((left_fitx[i] + right_fitx[i]) / 2), int(ploty[i] + image.shape[0]//2)), 2, (0, 0, 255), -1)
+            cv2.circle(line_image, (int(left_fitx[i]), int(ploty[i])), 2, (255, 0, 0), -1)
+            cv2.circle(line_image, (int(right_fitx[i]), int(ploty[i])), 2, (0, 255, 0), -1)
+            cv2.circle(line_image, (int((left_fitx[i] + right_fitx[i]) / 2), int(ploty[i])), 2, (0, 0, 255), -1)
 
         font = cv2.FONT_HERSHEY_SIMPLEX
         direction = 'Straight'
@@ -277,53 +200,34 @@ class LaneDetector(Node):
             return cv2.addWeighted(image, 0.8, line_image, 1, 1)
 
     def pid_control(self, error):
-        
         t = self.get_clock().now()
-        # Calculate the time difference (dt) in seconds
-        dt = (t - self.previous_t).nanoseconds / 1e9
+        dt = (t - self.t_previous).nanoseconds / 1e9
+        de = self.e_previous - error 
+        self.P = error
+        self.I = self.I + error * dt
+        self.D = de / dt if dt > 0 else 0
+        steer_rad = self.kp * self.P + self.ki * self.I + self.kd * self.D
+        
+        steer_rad = max(-self.max_angle, min(steer_rad, self.max_angle))
+        
+        self.t_previous = t
+        self.e_previous = error
 
-        # Calculate the proportional term
-        self.P = self.p_gain * error
-
-        # Calculate the integral term
-        self.I += error * dt
-        integral_term = self.i_gain * self.I
-
-        # Calculate the derivative term
-        derivative = (error - self.previous_e) / dt
-        self.D = self.d_gain * derivative
-
-        # Compute the PID output
-        output = self.P + integral_term + self.D
-
-        # Update previous error and time for the next iteration
-        self.previous_e = error
-        self.previous_t = t
-
-        return output
+        return steer_rad
 
     def callback(self, data):
-        error = data
-        
+        error = data.data
         steer_rad = self.pid_control(error)
 
-        if steer_rad > self.max_angle or not self.there_is_right_lane:
-            steer_rad = self.max_angle
-            
-        if steer_rad < -self.max_angle or not self.there_is_left_lane:
-            steer_rad = -self.max_angle
-
-        self.publish_center_offset(steer_rad)
-        
         twist = Twist()
         twist.linear.x = self.speed_mps
         twist.angular.z = steer_rad
 
-        self.drive_pub.publish(twist)
+        self.pub2.publish(twist)
 
 def main(args=None):
     rclpy.init(args=args)
-    lane_detect = LaneDetector()
+    lane_detect = LaneDetect()
     rclpy.spin(lane_detect)
     lane_detect.destroy_node()
     rclpy.shutdown()
