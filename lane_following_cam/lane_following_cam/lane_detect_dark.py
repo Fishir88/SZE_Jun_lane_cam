@@ -42,7 +42,8 @@ class LaneDetector(Node):
 
     def initialize_pid_parameters(self): #  Sets up stuff for the actual driving part
         self.p_gain = 0.00125
-        self.speed_mps = 0.5
+        self.speed_mps = 0.2
+        self.max_angle = 0.4
 
     def raw_listener(self, msg):
         cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
@@ -246,11 +247,11 @@ class LaneDetector(Node):
         twist.linear.x = self.speed_mps
         twist.angular.z = self.p_gain * center_deviation
         
-        if steer_rad < self.max_angle or not self.there_is_right_lane:
-            steer_rad = self.max_angle
+        if twist.angular.z < self.max_angle or not self.there_is_right_lane:
+            twist.angular.z = self.max_angle
             
-        if steer_rad > -self.max_angle or not self.there_is_left_lane:
-            steer_rad = -self.max_angle
+        if twist.angular.z > -self.max_angle or not self.there_is_left_lane:
+            twist.angular.z = -self.max_angle
         
         self.drive_pub.publish(twist)
 
