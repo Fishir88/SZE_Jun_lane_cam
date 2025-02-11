@@ -247,11 +247,11 @@ class LaneDetector(Node):
         twist.linear.x = self.speed_mps
         twist.angular.z = self.p_gain * center_deviation
         
-        if twist.angular.z < self.max_angle or not self.there_is_right_lane:
-            twist.angular.z = self.max_angle
-            
-        if twist.angular.z > -self.max_angle or not self.there_is_left_lane:
+        if twist.angular.z < -self.max_angle or not self.there_is_right_lane:
             twist.angular.z = -self.max_angle
+            
+        if twist.angular.z > self.max_angle or not self.there_is_left_lane:
+            twist.angular.z = self.max_angle
         
         self.drive_pub.publish(twist)
 
