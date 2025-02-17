@@ -35,14 +35,16 @@ class LaneDetector(Node):
             self.sub2 = self.create_subscription(CompressedImage, img_topic, self.compr_listener, 10)
             self.get_logger().info(f'lane_detect subscribed to compressed image topic: {img_topic}')
         self.lane_img_pub = self.create_publisher(Image, '/lane_img', 10)
-        self.cannytest_lane_img_pub = self.create_publisher(Image, '/cannytest_lane_img', 10)
+        self.amask_cannytest_lane_img_pub = self.create_publisher(Image, '/amask_cannytest_lane_img', 10)
         self.brighttest_lane_img_pub = self.create_publisher(Image, '/brighttest_lane_img', 10)
         self.drive_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.offset_pub = self.create_publisher(Float32, '/lane_center_offset', 10)
+        self.mask_img_pub = self.create_publisher(Image, '/mask_img', 10)
+        self.bmask_cannytest_lane_img_pub = self.create_publisher(Image, '/bmask_cannytest_lane_img', 10)
 
     def initialize_pid_parameters(self): #  Sets up stuff for the actual driving part
         self.p_gain = 0.00125
-        self.speed_mps = 0.2
+        self.speed_mps = 0.1
         self.max_angle = 0.4
 
     def raw_listener(self, msg):
@@ -79,9 +81,10 @@ class LaneDetector(Node):
         height = image.shape[0]
         bottom_half = image[height//2:, :]
 
+        ###Greyscale edge detection
         gray = cv2.cvtColor(bottom_half, cv2.COLOR_BGR2GRAY)
-        gray = cv2.convertScaleAbs(gray, alpha=11, beta=40) 
-        gray = cv2.GaussianBlur(gray, (19, 13), 0)
+        gray = cv2.convertScaleAbs(gray, alpha=10, beta=20) 
+        gray = cv2.GaussianBlur(gray, (15, 19), 0)
         
         # Publish the image before Canny
         gray_ros_image = self.bridge.cv2_to_imgmsg(gray, 'mono8')
@@ -91,13 +94,37 @@ class LaneDetector(Node):
         
         # Publish the Canny edge-detected image
         edges_ros_image = self.bridge.cv2_to_imgmsg(edges, 'mono8')
-        self.cannytest_lane_img_pub.publish(edges_ros_image)
+        self.amask_cannytest_lane_img_pub.publish(edges_ros_image)
         
-        return edges
+        # Post-process edges to close gaps and reduce noise
+        kernel = np.ones((3, 3), np.uint8)
+        final_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        
+        '''
+        # Find contours in the edge-detected image
+        contours, _ = cv2.findContours(final_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Create a mask to keep only large contours
+        min_contour_area = 10  # Minimum contour area to keep
+        large_contours_mask = np.zeros_like(final_edges)
+        for contour in contours:
+            if cv2.contourArea(contour) > min_contour_area:
+                cv2.drawContours(large_contours_mask, [contour], -1, 255, thickness=cv2.FILLED)
+
+        # Apply the mask to the final edges
+        final_edges = cv2.bitwise_and(final_edges, large_contours_mask)'''
+        
+        # Publish the Canny edge-detected image
+        edges_ros_image = self.bridge.cv2_to_imgmsg(edges, 'mono8')
+        self.bmask_cannytest_lane_img_pub.publish(edges_ros_image)
+        edges_ros_image = self.bridge.cv2_to_imgmsg(final_edges, 'mono8')
+        self.amask_cannytest_lane_img_pub.publish(edges_ros_image)
+
+        return final_edges
 
     def sliding_window(self, edges):
         window_height = 25
-        num_windows = 8
+        num_windows = 10
         margin = 200
         minpix = 180
 
