@@ -21,8 +21,8 @@ class LaneDetector(Node):
         self.there_is_left_lane = False
         self.size = (0, 0)
         self.frame_count = 0  # Initialize frame counter
-        self.left_fitx = np.zeros(3)  # Initialize as array
-        self.right_fitx = np.zeros(3)
+        self.left_fitx = None  # Initialize as array
+        self.right_fitx = None
         self.lane_width = 300
 
     def start(self):
@@ -68,7 +68,6 @@ class LaneDetector(Node):
         self.lane_img_pub.publish(ros_image)
 
     def detect_lanes(self, image):
-        print(self.left_fitx, self.right_fitx)
         edges = self.apply_edge_detection(image)
         
         self.lane_check(edges)
@@ -77,7 +76,7 @@ class LaneDetector(Node):
             self.get_logger().error("No lanes detected.")
             return np.zeros_like(image)
         
-        self.left_fitx, self.right_fitx = self.sliding_window(edges)
+        self.left_fitx, self.right_fitx = self.process_frame(edges)
         left_fitx, right_fitx = self.left_fitx, self.right_fitx
         
         midpoint = image.shape[1] // 2
@@ -177,32 +176,35 @@ class LaneDetector(Node):
         left_fit = None
         right_fit = None
 
-        if len(leftx) > 0 and len(lefty) > 0:
+        # Check for sufficient data points
+        if len(leftx) >= 3 and len(lefty) >= 3:
             with warnings.catch_warnings():
                 warnings.simplefilter('error', np.RankWarning)
                 try:
                     left_fit = np.polyfit(lefty, leftx, 2)
-                except (np.RankWarning, np.linalg.LinAlgError):
-                    self.get_logger().warning("Left lane polyfit may be poorly conditioned")
+                except (np.RankWarning, np.linalg.LinAlgError) as e:
+                    self.get_logger().warning(f"Left lane polyfit may be poorly conditioned: {e}")
+        else:
+            self.there_is_left_lane = False
 
-        if len(rightx) > 0 and len(righty) > 0:
+        if len(rightx) >= 3 and len(righty) >= 3:
             with warnings.catch_warnings():
                 warnings.simplefilter('error', np.RankWarning)
                 try:
                     right_fit = np.polyfit(righty, rightx, 2)
-                except (np.RankWarning, np.linalg.LinAlgError):
-                    self.get_logger().warning("Right lane polyfit may be poorly conditioned")
+                except (np.RankWarning, np.linalg.LinAlgError) as e:
+                    self.get_logger().warning(f"Right lane polyfit may be poorly conditioned: {e}")
+        else:
+            self.there_is_right_lane = False
 
         ploty = np.linspace(0, edges.shape[0] - 1, edges.shape[0])
 
         if self.there_is_left_lane and left_fit is not None:
-            
             left_fitx = left_fit[0] * ploty**2 + left_fit[1] * ploty + left_fit[2]
         else:
             left_fitx = self.create_imaginary_lane(right_fit, self.lane_width, 'left')
 
         if self.there_is_right_lane and right_fit is not None:
-            
             right_fitx = right_fit[0] * ploty**2 + right_fit[1] * ploty + right_fit[2]
         else:
             right_fitx = self.create_imaginary_lane(left_fit, self.lane_width, 'right')
@@ -294,7 +296,7 @@ class LaneDetector(Node):
 
         # Check lane width consistency
         lane_width = np.abs(left_fitx[2] - right_fitx[2])
-        return curvature_diff < 1000 and 300 < lane_width < 500  # Adjust thresholds
+        return curvature_diff < 1000 and 0 < lane_width < 500  # Adjust thresholds
 
     def create_imaginary_lane(self, fit, lane_width, direction):
         if fit is None:
@@ -313,29 +315,25 @@ class LaneDetector(Node):
         nonzero = edges.nonzero()
         nonzeroy = nonzero[0]
         nonzerox = nonzero[1]
-        margin = 50  # Adjust margin as needed
-
-        # Handle invalid previous fits (initialize to 3 coefficients for 2nd-order)
-        if left_fitx_prev is None or len(left_fitx_prev) < 3:
-            left_fitx_prev = np.zeros(3)
-        if right_fitx_prev is None or len(right_fitx_prev) < 3:
-            right_fitx_prev = np.zeros(3)
+        margin = 5  # Adjust margin as needed
 
         left_lane_inds = []
         right_lane_inds = []
 
-        if self.there_is_left_lane:
-            # 2nd-order polynomial evaluation
+        ploty = np.linspace(0, edges.shape[0] - 1, edges.shape[0])
+
+        if self.there_is_left_lane and left_fitx_prev is not None:
+            left_fitx_prev = np.array(left_fitx_prev)
             left_lane_inds = (
-                (nonzerox > (left_fitx_prev[0] * nonzeroy**2 + left_fitx_prev[1] * nonzeroy + left_fitx_prev[2] - margin)) &
-                (nonzerox < (left_fitx_prev[0] * nonzeroy**2 + left_fitx_prev[1] * nonzeroy + left_fitx_prev[2] + margin))
+                (nonzerox > (left_fitx_prev[nonzeroy] - margin)) &
+                (nonzerox < (left_fitx_prev[nonzeroy] + margin))
             )
 
-        if self.there_is_right_lane:
-            # 2nd-order polynomial evaluation
+        if self.there_is_right_lane and right_fitx_prev is not None:
+            right_fitx_prev = np.array(right_fitx_prev)
             right_lane_inds = (
-                (nonzerox > (right_fitx_prev[0] * nonzeroy**2 + right_fitx_prev[1] * nonzeroy + right_fitx_prev[2] - margin)) &
-                (nonzerox < (right_fitx_prev[0] * nonzeroy**2 + right_fitx_prev[1] * nonzeroy + right_fitx_prev[2] + margin))
+                (nonzerox > (right_fitx_prev[nonzeroy] - margin)) &
+                (nonzerox < (right_fitx_prev[nonzeroy] + margin))
             )
 
         leftx = nonzerox[left_lane_inds] if self.there_is_left_lane else np.array([])
@@ -346,7 +344,7 @@ class LaneDetector(Node):
         return self.fit_polynomial(leftx, lefty, rightx, righty, edges)
 
     def process_frame(self, edges):
-        if self.frame_count == 5 or self.right_fitx is None or self.left_fitx is None:
+        if self.frame_count == 10 or self.right_fitx is None or self.left_fitx is None:
             # Reset with sliding window every 5 frames
             self.left_fitx, self.right_fitx = self.sliding_window(edges)
             self.frame_count = 0
