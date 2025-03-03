@@ -23,7 +23,7 @@ class LaneDetector(Node):
         self.frame_count = 0  # Initialize frame counter
         self.left_fitx = None  # Initialize as array
         self.right_fitx = None
-        self.lane_width = 300
+        self.lane_width = 400
 
     def start(self):
         self.declare_parameter('is_raw_image', True)
@@ -42,7 +42,7 @@ class LaneDetector(Node):
         self.lane_img_pub = self.create_publisher(Image, '/lane_img', 10)
         self.amask_cannytest_lane_img_pub = self.create_publisher(Image, '/amask_cannytest_lane_img', 10)
         self.brighttest_lane_img_pub = self.create_publisher(Image, '/brighttest_lane_img', 10)
-        self.drive_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.drive_pub = self.create_publisher(Twist, '/cmd_vel1', 10)
         self.offset_pub = self.create_publisher(Float32, '/lane_center_offset', 10)
         
     def initialize_pid_parameters(self):
@@ -176,6 +176,12 @@ class LaneDetector(Node):
         left_fit = None
         right_fit = None
 
+        '''# Debugging statements to inspect input data
+        self.get_logger().info(f'leftx: {len(leftx)}')
+        self.get_logger().info(f'lefty: {len(lefty)}')
+        self.get_logger().info(f'rightx: {len(rightx)}')
+        self.get_logger().info(f'righty: {len(righty)}')'''
+
         # Check for sufficient data points
         if len(leftx) >= 3 and len(lefty) >= 3:
             with warnings.catch_warnings():
@@ -202,12 +208,12 @@ class LaneDetector(Node):
         if self.there_is_left_lane and left_fit is not None:
             left_fitx = left_fit[0] * ploty**2 + left_fit[1] * ploty + left_fit[2]
         else:
-            left_fitx = self.create_imaginary_lane(right_fit, self.lane_width, 'left')
+            left_fitx = self.create_imaginary_lane(right_fit, self.lane_width, 'left', edges)
 
         if self.there_is_right_lane and right_fit is not None:
             right_fitx = right_fit[0] * ploty**2 + right_fit[1] * ploty + right_fit[2]
         else:
-            right_fitx = self.create_imaginary_lane(left_fit, self.lane_width, 'right')
+            right_fitx = self.create_imaginary_lane(left_fit, self.lane_width, 'right', edges)
 
         return left_fitx, right_fitx
         
@@ -298,11 +304,11 @@ class LaneDetector(Node):
         lane_width = np.abs(left_fitx[2] - right_fitx[2])
         return curvature_diff < 1000 and 0 < lane_width < 500  # Adjust thresholds
 
-    def create_imaginary_lane(self, fit, lane_width, direction):
+    def create_imaginary_lane(self, fit, lane_width, direction, edges):
         if fit is None:
             return None
 
-        ploty = np.linspace(0, self.size[0] - 1, self.size[0])
+        ploty = np.linspace(0, edges.shape[0] - 1, edges.shape[0])
         
         if direction == 'left':
             imaginary_fitx = fit[0] * ploty**2 + fit[1] * ploty + (fit[2] - lane_width)
@@ -344,7 +350,7 @@ class LaneDetector(Node):
         return self.fit_polynomial(leftx, lefty, rightx, righty, edges)
 
     def process_frame(self, edges):
-        if self.frame_count == 10 or self.right_fitx is None or self.left_fitx is None:
+        if self.frame_count == 0 or self.right_fitx is None or self.left_fitx is None:
             # Reset with sliding window every 5 frames
             self.left_fitx, self.right_fitx = self.sliding_window(edges)
             self.frame_count = 0
@@ -361,8 +367,13 @@ class LaneDetector(Node):
     
     def calculate_center_deviation(self, left_fitx, right_fitx, midpoint):
         if left_fitx is not None and right_fitx is not None:
-            center_fitx_last = (left_fitx[-1] + right_fitx[-1]) / 2
-            return (center_fitx_last - midpoint) / 255
+            center_height = int(len(left_fitx) * 0.8)
+            
+            self.get_logger().info(f'left_fitx: {len(left_fitx)}')
+            self.get_logger().info(f'center_height: {center_height}')
+            
+            lane_center = (left_fitx[center_height] + right_fitx[center_height]) / 2
+            return (lane_center - midpoint)
         else:
             return 0.0
             
@@ -374,10 +385,10 @@ class LaneDetector(Node):
         twist.linear.x = self.speed_mps
         twist.angular.z = self.p_gain * center_deviation
         
-        if twist.angular.z < -self.max_angle or not self.there_is_right_lane:
+        if twist.angular.z < -self.max_angle:
             twist.angular.z = -self.max_angle
             
-        if twist.angular.z > self.max_angle or not self.there_is_left_lane:
+        if twist.angular.z > self.max_angle:
             twist.angular.z = self.max_angle
         
         self.drive_pub.publish(twist)
@@ -387,9 +398,9 @@ class LaneDetector(Node):
         height = image.shape[0]
         offset = int(height / 1.8)
         for i in range(height - offset):
-            if self.there_is_left_lane and left_fitx is not None:
+            if left_fitx is not None:
                 cv2.circle(line_image, (int(left_fitx[i]), int(i + offset)), 2, (255, 0, 0), -1)
-            if self.there_is_right_lane and right_fitx is not None:
+            if right_fitx is not None:
                 cv2.circle(line_image, (int(right_fitx[i]), int(i + offset)), 2, (0, 255, 0), -1)
             #if self.there_is_left_lane and self.there_is_right_lane and left_fitx is not None and right_fitx is not None:
                 #cv2.circle(line_image, (int((left_fitx[i] + right_fitx[i]) / 2), int(i + offset)), 2, (0, 0, 255), -1)
@@ -397,9 +408,9 @@ class LaneDetector(Node):
         font = cv2.FONT_HERSHEY_SIMPLEX
         direction = 'Straight'
         if center_deviation > 0.01:
-            direction = 'Right'
-        elif center_deviation < -0.01:
             direction = 'Left'
+        elif center_deviation < -0.01:
+            direction = 'Right'
         cv2.putText(line_image, f'{direction} {abs(center_deviation):.2f}', (10, 30), font, 1, (60, 40, 200), 2, cv2.LINE_AA)
 
         return cv2.addWeighted(image, 0.8, line_image, 1, 1)
